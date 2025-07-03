@@ -1,0 +1,132 @@
+# app_v1.1.R
+library(shiny)
+
+# --- UI (User Interface) ---
+ui <- fluidPage(
+  titlePanel("Kalkulator Ukuran Sampel (n) - v1.1 (SRS & Systematic)"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      h3("1. Pilih Tujuan & Metode"),
+      selectInput("purpose",
+                  "Tujuan Penelitian:",
+                  choices = c("Estimasi Proporsi", "Estimasi Rata-rata"),
+                  selected = "Estimasi Proporsi"),
+      
+      selectInput("main_method",
+                  "Metode Sampling Utama:",
+                  choices = c("Simple Random Sampling (SRS)",
+                              "Systematic Sampling"), # Hanya 2 metode ini di v1.1
+                  selected = "Simple Random Sampling (SRS)"),
+      
+      conditionalPanel(
+        condition = "input.main_method == 'Simple Random Sampling (SRS)'",
+        radioButtons("srs_type",
+                     "Tipe SRS:",
+                     choices = c("Without Replacement (WOR) - dengan FPC",
+                                 "With Replacement (WR) - tanpa FPC"),
+                     selected = "Without Replacement (WOR) - dengan FPC")
+      ),
+      
+      hr(),
+      
+      h3("2. Input Umum"),
+      sliderInput("confidence_level",
+                  "Tingkat Kepercayaan:",
+                  min = 0.80, max = 0.99, value = 0.95, step = 0.01),
+      numericInput("margin_error",
+                   "Margin Kesalahan (contoh: 0.05 untuk 5% atau 5 unit):",
+                   value = 0.05, min = 0.001),
+      
+      hr(),
+      
+      h3("3. Input Spesifik"),
+      # N_population_srs_sys digunakan untuk SRS/Systematic
+      conditionalPanel(
+        condition = "input.main_method == 'Simple Random Sampling (SRS)' || input.main_method == 'Systematic Sampling'",
+        numericInput("N_population_srs_sys",
+                     "Total Ukuran Populasi (N):",
+                     value = 1000, min = 1)
+      ),
+      
+      conditionalPanel(
+        condition = "input.purpose == 'Estimasi Proporsi'",
+        numericInput("p_estimate",
+                     "Estimasi Awal Proporsi Populasi (0-1, gunakan 0.5 jika tidak yakin):",
+                     value = 0.5, min = 0, max = 1, step = 0.01)
+      ),
+      
+      conditionalPanel(
+        condition = "input.purpose == 'Estimasi Rata-rata'",
+        numericInput("sd_estimate",
+                     "Estimasi Standar Deviasi Populasi (σ):",
+                     value = 10, min = 0.001)
+      ),
+      
+      actionButton("calculate_n", "Hitung Ukuran Sampel (n)")
+    ),
+    
+    mainPanel(
+      h3("Hasil Perhitungan Ukuran Sampel"),
+      h4("Ukuran Sampel (n) yang Direkomendasikan:"),
+      verbatimTextOutput("sample_size_output"),
+      uiOutput("additional_info")
+    )
+  )
+)
+
+# --- Server Logic ---
+server <- function(input, output, session) {
+  
+  get_z_score <- function(confidence_level) {
+    qnorm(1 - (1 - confidence_level) / 2)
+  }
+  
+  calculated_n <- eventReactive(input$calculate_n, {
+    Z <- get_z_score(input$confidence_level)
+    E <- input$margin_error
+    N <- input$N_population_srs_sys # Untuk SRS/Sistematik
+    
+    n0 <- NA
+    output$additional_info <- renderUI(NULL)
+    
+    if (input$purpose == "Estimasi Proporsi") {
+      p <- input$p_estimate
+      n0 <- (Z^2 * p * (1 - p)) / (E^2)
+    } else if (input$purpose == "Estimasi Rata-rata") {
+      sigma <- input$sd_estimate
+      n0 <- (Z^2 * sigma^2) / (E^2)
+    }
+    
+    # Cek tipe SRS atau Systematic untuk FPC
+    if ((input$main_method == "Simple Random Sampling (SRS)" && input$srs_type == "Without Replacement (WOR) - dengan FPC") ||
+        (input$main_method == "Systematic Sampling")) {
+      # Aplikasikan FPC jika WOR atau Systematic
+      if (!is.null(N) && N > 0) {
+        n_val <- ceiling(n0 / (1 + (n0 - 1) / N))
+      } else {
+        n_val <- ceiling(n0)
+      }
+      output$additional_info <- renderUI({
+        HTML(paste0("<p>Menggunakan Cochran's Formula dengan Koreksi Populasi Terbatas (FPC).</p>"))
+      })
+    } else { # SRS WR
+      n_val <- ceiling(n0)
+      output$additional_info <- renderUI({
+        HTML(paste0("<p>Menggunakan Cochran's Formula (tanpa Koreksi Populasi Terbatas).</p>"))
+      })
+    }
+    
+    if (is.na(n_val) || n_val < 1) {
+      "Input tidak valid atau perhitungan tidak dapat dilakukan. Pastikan semua input terisi dengan benar."
+    } else {
+      as.character(ceiling(n_val))
+    }
+  })
+  
+  output$sample_size_output <- renderText({
+    calculated_n()
+  })
+}
+
+shinyApp(ui = ui, server = server)
