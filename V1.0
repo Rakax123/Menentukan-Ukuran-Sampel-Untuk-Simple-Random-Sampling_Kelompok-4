@@ -1,9 +1,8 @@
-# app_v1.1.R
+# app_v1.2.R
 library(shiny)
 
-# --- UI (User Interface) ---
 ui <- fluidPage(
-  titlePanel("Kalkulator Ukuran Sampel (n) - v1.1 (SRS & Systematic)"),
+  titlePanel("Kalkulator Ukuran Sampel (n) - v1.2 (SRS, Systematic, Stratified)"),
   
   sidebarLayout(
     sidebarPanel(
@@ -16,7 +15,8 @@ ui <- fluidPage(
       selectInput("main_method",
                   "Metode Sampling Utama:",
                   choices = c("Simple Random Sampling (SRS)",
-                              "Systematic Sampling"), # Hanya 2 metode ini di v1.1
+                              "Systematic Sampling",
+                              "Stratified Random Sampling"), 
                   selected = "Simple Random Sampling (SRS)"),
       
       conditionalPanel(
@@ -41,7 +41,6 @@ ui <- fluidPage(
       hr(),
       
       h3("3. Input Spesifik"),
-      # N_population_srs_sys digunakan untuk SRS/Systematic
       conditionalPanel(
         condition = "input.main_method == 'Simple Random Sampling (SRS)' || input.main_method == 'Systematic Sampling'",
         numericInput("N_population_srs_sys",
@@ -63,6 +62,18 @@ ui <- fluidPage(
                      value = 10, min = 0.001)
       ),
       
+      conditionalPanel(
+        condition = "input.main_method == 'Stratified Random Sampling'",
+        numericInput("num_strata",
+                     "Jumlah Strata:",
+                     value = 2, min = 1),
+        uiOutput("strata_inputs"),
+        selectInput("allocation_method",
+                    "Metode Alokasi Sampel:",
+                    choices = c("Proporsional", "Optimal (Neyman)"),
+                    selected = "Proporsional")
+      ),
+      
       actionButton("calculate_n", "Hitung Ukuran Sampel (n)")
     ),
     
@@ -75,46 +86,122 @@ ui <- fluidPage(
   )
 )
 
-# --- Server Logic ---
 server <- function(input, output, session) {
   
   get_z_score <- function(confidence_level) {
     qnorm(1 - (1 - confidence_level) / 2)
   }
   
+  output$strata_inputs <- renderUI({
+    num_strata <- input$num_strata
+    if (is.null(num_strata) || num_strata < 1) return(NULL)
+    
+    lapply(1:num_strata, function(i) {
+      fluidRow(
+        column(6, numericInput(paste0("N_stratum_", i), paste0("Ukuran Strata ", i, " (Nh):"), value = 100, min = 1)),
+        column(6,
+               if (input$purpose == "Estimasi Proporsi") {
+                 numericInput(paste0("p_stratum_", i), paste0("Estimasi Proporsi Strata ", i, " (ph):"), value = 0.5, min = 0, max = 1, step = 0.01)
+               } else {
+                 numericInput(paste0("sd_stratum_", i), paste0("Estimasi SD Strata ", i, " (σh):"), value = 5, min = 0.001)
+               }
+        )
+      )
+    })
+  })
+  
   calculated_n <- eventReactive(input$calculate_n, {
     Z <- get_z_score(input$confidence_level)
     E <- input$margin_error
-    N <- input$N_population_srs_sys # Untuk SRS/Sistematik
     
-    n0 <- NA
+    n_val <- NA
     output$additional_info <- renderUI(NULL)
     
     if (input$purpose == "Estimasi Proporsi") {
       p <- input$p_estimate
-      n0 <- (Z^2 * p * (1 - p)) / (E^2)
+      
+      if (input$main_method == "Simple Random Sampling (SRS)" || input$main_method == "Systematic Sampling") {
+        N <- input$N_population_srs_sys
+        n0 <- (Z^2 * p * (1 - p)) / (E^2)
+        
+        if ((input$main_method == "Simple Random Sampling (SRS)" && input$srs_type == "Without Replacement (WOR) - dengan FPC") ||
+            (input$main_method == "Systematic Sampling")) {
+          if (!is.null(N) && N > 0) {
+            n_val <- ceiling(n0 / (1 + (n0 - 1) / N))
+          } else { n_val <- ceiling(n0) }
+          output$additional_info <- renderUI({ HTML(paste0("<p>Menggunakan Cochran's Formula dengan Koreksi Populasi Terbatas (FPC).</p>")) })
+        } else { # SRS WR
+          n_val <- ceiling(n0)
+          output$additional_info <- renderUI({ HTML(paste0("<p>Menggunakan Cochran's Formula (tanpa Koreksi Populasi Terbatas).</p>")) })
+        }
+      } else if (input$main_method == "Stratified Random Sampling") {
+        num_strata <- input$num_strata
+        if (is.null(num_strata) || num_strata < 1) return("Jumlah strata tidak valid.")
+        
+        total_N_strata <- 0
+        sum_Nh_ph_qh <- 0
+        sum_Nh_sh <- 0
+        for (i in 1:num_strata) {
+          Nh <- input[[paste0("N_stratum_", i)]]
+          ph <- input[[paste0("p_stratum_", i)]]
+          total_N_strata <- total_N_strata + Nh
+          sum_Nh_ph_qh <- sum_Nh_ph_qh + (Nh * ph * (1 - ph))
+          sum_Nh_sh <- sum_Nh_sh + (Nh * sqrt(ph * (1-ph)))
+        }
+        
+        if (input$allocation_method == "Proporsional") {
+          num <- Z^2 * sum_Nh_ph_qh
+          den <- E^2 * total_N_strata^2 + Z^2 * sum_Nh_ph_qh
+          n_val <- ceiling(num / den)
+        } else if (input$allocation_method == "Optimal (Neyman)") {
+          num_neyman <- (sum_Nh_sh)^2
+          den_neyman <- (total_N_strata^2 * E^2 / Z^2) + sum_Nh_ph_qh
+          n_val <- ceiling(num_neyman / den_neyman)
+        }
+      }
+      
     } else if (input$purpose == "Estimasi Rata-rata") {
       sigma <- input$sd_estimate
-      n0 <- (Z^2 * sigma^2) / (E^2)
-    }
-    
-    # Cek tipe SRS atau Systematic untuk FPC
-    if ((input$main_method == "Simple Random Sampling (SRS)" && input$srs_type == "Without Replacement (WOR) - dengan FPC") ||
-        (input$main_method == "Systematic Sampling")) {
-      # Aplikasikan FPC jika WOR atau Systematic
-      if (!is.null(N) && N > 0) {
-        n_val <- ceiling(n0 / (1 + (n0 - 1) / N))
-      } else {
-        n_val <- ceiling(n0)
+      
+      if (input$main_method == "Simple Random Sampling (SRS)" || input$main_method == "Systematic Sampling") {
+        N <- input$N_population_srs_sys
+        n0 <- (Z^2 * sigma^2) / (E^2)
+        
+        if ((input$main_method == "Simple Random Sampling (SRS)" && input$srs_type == "Without Replacement (WOR) - dengan FPC") ||
+            (input$main_method == "Systematic Sampling")) {
+          if (!is.null(N) && N > 0) {
+            n_val <- ceiling(n0 / (1 + (n0 - 1) / N))
+          } else { n_val <- ceiling(n0) }
+          output$additional_info <- renderUI({ HTML(paste0("<p>Menggunakan Cochran's Formula dengan Koreksi Populasi Terbatas (FPC).</p>")) })
+        } else { # SRS WR
+          n_val <- ceiling(n0)
+          output$additional_info <- renderUI({ HTML(paste0("<p>Menggunakan Cochran's Formula (tanpa Koreksi Populasi Terbatas).</p>")) })
+        }
+      } else if (input$main_method == "Stratified Random Sampling") {
+        num_strata <- input$num_strata
+        if (is.null(num_strata) || num_strata < 1) return("Jumlah strata tidak valid.")
+        
+        total_N_strata <- 0
+        sum_Nh_sdh_squared <- 0
+        sum_Nh_sdh <- 0
+        for (i in 1:num_strata) {
+          Nh <- input[[paste0("N_stratum_", i)]]
+          sdh <- input[[paste0("sd_stratum_", i)]]
+          total_N_strata <- total_N_strata + Nh
+          sum_Nh_sdh_squared <- sum_Nh_sdh_squared + (Nh * sdh^2)
+          sum_Nh_sdh <- sum_Nh_sdh + (Nh * sdh)
+        }
+        
+        if (input$allocation_method == "Proporsional") {
+          num <- Z^2 * sum_Nh_sdh_squared
+          den <- E^2 * total_N_strata^2 + Z^2 * sum_Nh_sdh_squared
+          n_val <- ceiling(num / den)
+        } else if (input$allocation_method == "Optimal (Neyman)") {
+          num_neyman <- (sum_Nh_sdh)^2
+          den_neyman <- (total_N_strata^2 * E^2 / Z^2) + sum_Nh_sdh_squared
+          n_val <- ceiling(num_neyman / den_neyman)
+        }
       }
-      output$additional_info <- renderUI({
-        HTML(paste0("<p>Menggunakan Cochran's Formula dengan Koreksi Populasi Terbatas (FPC).</p>"))
-      })
-    } else { # SRS WR
-      n_val <- ceiling(n0)
-      output$additional_info <- renderUI({
-        HTML(paste0("<p>Menggunakan Cochran's Formula (tanpa Koreksi Populasi Terbatas).</p>"))
-      })
     }
     
     if (is.na(n_val) || n_val < 1) {
